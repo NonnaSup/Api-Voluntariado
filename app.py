@@ -2124,183 +2124,487 @@ def eliminar_destinatario_proyecto(id):
     })
 
 
-####################### GESTION SESIONES DE ASISTENCIA ##############################
+####################### GESTION SESIONES DE ASISTENCIA #######################
 
-############################ CREAR SESION ############################
+# =========================================================
+# CREAR SESIÓN DE ASISTENCIA
+# =========================================================
 
 @app.route("/nueva_sesion", methods=["POST"])
 @cross_origin()
 def nueva_sesion():
 
-    proyectos_idproyecto = request.json["proyectos_idproyecto"]
-    usuario_idusuario = request.json["usuario_idusuario"]
+    datos = request.get_json(silent=True) or {}
 
-    fecha = datetime.now(
-        ZoneInfo("America/Argentina/Buenos_Aires")
-    )
+    proyectos_idproyecto = datos.get("proyectos_idproyecto")
+    usuario_idusuario = datos.get("usuario_idusuario")
+
+    if not proyectos_idproyecto or not usuario_idusuario:
+        return jsonify({
+            "error": "El proyecto y el usuario son obligatorios"
+        }), 400
 
     cursor = mysql.connection.cursor()
 
-    sql = """
-    INSERT INTO sesiones_asistencia
-    (
-        fecha,
-        proyectos_idproyecto,
-        usuario_idusuario
-    )
-    VALUES (%s, %s, %s)
-    """
+    try:
+        cursor.execute(
+            "SELECT idproyecto FROM proyectos WHERE idproyecto = %s",
+            (proyectos_idproyecto,)
+        )
 
-    cursor.execute(sql, (
-        fecha,
-        proyectos_idproyecto,
-        usuario_idusuario
-    ))
+        if cursor.fetchone() is None:
+            return jsonify({
+                "error": "El proyecto no existe"
+            }), 404
 
-    mysql.connection.commit()
+        cursor.execute(
+            "SELECT idusuario FROM usuario WHERE idusuario = %s",
+            (usuario_idusuario,)
+        )
 
-    idsesion = cursor.lastrowid
+        if cursor.fetchone() is None:
+            return jsonify({
+                "error": "El usuario no existe"
+            }), 404
 
-    cursor.close()
+        fecha = datetime.now(
+            ZoneInfo("America/Argentina/Buenos_Aires")
+        )
 
-    return jsonify({
-        "resultado": "Sesión creada correctamente",
-        "idsesion": idsesion
-    })
+        cursor.execute(
+            """
+            INSERT INTO sesiones_asistencia
+                (fecha, proyectos_idproyecto, usuario_idusuario)
+            VALUES (%s, %s, %s)
+            """,
+            (
+                fecha,
+                proyectos_idproyecto,
+                usuario_idusuario
+            )
+        )
+
+        id_sesion = cursor.lastrowid
+
+        mysql.connection.commit()
+
+        return jsonify({
+            "resultado": "Sesión creada correctamente",
+            "idsesion": id_sesion
+        }), 201
+
+    except Exception as e:
+        mysql.connection.rollback()
+        app.logger.exception("Error al crear sesión de asistencia")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
 
 
-############################ TRAER SESIONES ############################
+# =========================================================
+# TRAER TODAS LAS SESIONES
+# =========================================================
 
 @app.route("/traer_sesiones", methods=["GET"])
 @cross_origin()
 def traer_sesiones():
 
-    sql = """
-    SELECT
-        s.idsesion,
-        s.fecha,
-        p.nombre,
-        u.nombre
-    FROM sesiones_asistencia s
-    INNER JOIN proyectos p
-        ON s.proyectos_idproyecto = p.idproyecto
-    INNER JOIN usuario u
-        ON s.usuario_idusuario = u.idusuario
-    ORDER BY s.fecha DESC
-    """
-
     cursor = mysql.connection.cursor()
-    cursor.execute(sql)
 
-    resultado = cursor.fetchall()
+    try:
+        cursor.execute(
+            """
+            SELECT
+                s.idsesion,
+                s.fecha,
+                s.proyectos_idproyecto,
+                p.nombre,
+                s.usuario_idusuario,
+                u.nombre
+            FROM sesiones_asistencia s
+            INNER JOIN proyectos p
+                ON s.proyectos_idproyecto = p.idproyecto
+            INNER JOIN usuario u
+                ON s.usuario_idusuario = u.idusuario
+            ORDER BY s.fecha DESC
+            """
+        )
 
-    cursor.close()
+        filas = cursor.fetchall()
 
-    sesiones = []
+        sesiones = []
 
-    for i in resultado:
+        for fila in filas:
+            sesiones.append({
+                "idsesion": fila[0],
+                "fecha": fila[1].isoformat() if fila[1] else None,
+                "proyectos_idproyecto": fila[2],
+                "proyecto": fila[3],
+                "usuario_idusuario": fila[4],
+                "usuario": fila[5]
+            })
 
-        sesiones.append({
+        return jsonify(sesiones), 200
 
-            "idsesion": i[0],
-            "fecha": i[1],
-            "proyecto": i[2],
-            "usuario": i[3]
+    except Exception as e:
+        app.logger.exception("Error al consultar sesiones")
 
-        })
+        return jsonify({
+            "error": str(e)
+        }), 500
 
-    return jsonify(sesiones)
+    finally:
+        cursor.close()
 
 
-############################ TRAER UNA SESION ############################
+# =========================================================
+# TRAER UNA SESIÓN
+# =========================================================
 
 @app.route("/traer_sesion/<int:idsesion>", methods=["GET"])
 @cross_origin()
 def traer_sesion(idsesion):
 
-    sql = """
-    SELECT
-        s.idsesion,
-        s.fecha,
-        p.nombre,
-        u.nombre
-    FROM sesiones_asistencia s
-    INNER JOIN proyectos p
-        ON s.proyectos_idproyecto = p.idproyecto
-    INNER JOIN usuario u
-        ON s.usuario_idusuario = u.idusuario
-    WHERE s.idsesion=%s
-    """
-
     cursor = mysql.connection.cursor()
 
-    cursor.execute(sql, (idsesion,))
+    try:
+        cursor.execute(
+            """
+            SELECT
+                s.idsesion,
+                s.fecha,
+                s.proyectos_idproyecto,
+                p.nombre,
+                s.usuario_idusuario,
+                u.nombre
+            FROM sesiones_asistencia s
+            INNER JOIN proyectos p
+                ON s.proyectos_idproyecto = p.idproyecto
+            INNER JOIN usuario u
+                ON s.usuario_idusuario = u.idusuario
+            WHERE s.idsesion = %s
+            """,
+            (idsesion,)
+        )
 
-    resultado = cursor.fetchone()
+        fila = cursor.fetchone()
 
-    cursor.close()
+        if fila is None:
+            return jsonify({
+                "error": "Sesión no encontrada"
+            }), 404
 
-    if resultado is None:
         return jsonify({
-            "mensaje": "Sesión no encontrada"
-        })
+            "idsesion": fila[0],
+            "fecha": fila[1].isoformat() if fila[1] else None,
+            "proyectos_idproyecto": fila[2],
+            "proyecto": fila[3],
+            "usuario_idusuario": fila[4],
+            "usuario": fila[5]
+        }), 200
 
-    return jsonify({
+    except Exception as e:
+        app.logger.exception("Error al consultar sesión")
 
-        "idsesion": resultado[0],
-        "fecha": resultado[1],
-        "proyecto": resultado[2],
-        "usuario": resultado[3]
+        return jsonify({
+            "error": str(e)
+        }), 500
 
-    })
+    finally:
+        cursor.close()
 
 
-############################ ACTUALIZAR SESION ############################
+# =========================================================
+# GUARDAR ASISTENCIAS DE UNA SESIÓN
+# =========================================================
 
-@app.route("/actualizar_sesion/<int:idsesion>", methods=["PUT"])
+@app.route("/guardar_asistencia", methods=["POST"])
 @cross_origin()
-def actualizar_sesion(idsesion):
+def guardar_asistencia():
 
-    datos = request.json
+    datos = request.get_json(silent=True) or {}
 
-    campos = []
-    valores = []
+    id_sesion = datos.get("sesiones_idsesion")
+    asistencias = datos.get("asistencias")
 
-    if "proyectos_idproyecto" in datos:
-        campos.append("proyectos_idproyecto=%s")
-        valores.append(datos["proyectos_idproyecto"])
-
-    if "usuario_idusuario" in datos:
-        campos.append("usuario_idusuario=%s")
-        valores.append(datos["usuario_idusuario"])
-
-    if len(campos) == 0:
+    if not id_sesion or not isinstance(asistencias, list):
         return jsonify({
-            "resultado": "No se enviaron datos para actualizar"
+            "error": "La sesión y la lista de asistencias son obligatorias"
         }), 400
 
-    sql = f"""
-    UPDATE sesiones_asistencia
-    SET {', '.join(campos)}
-    WHERE idsesion=%s
-    """
-
-    valores.append(idsesion)
+    if len(asistencias) == 0:
+        return jsonify({
+            "error": "No hay destinatarios para registrar"
+        }), 400
 
     cursor = mysql.connection.cursor()
 
-    cursor.execute(sql, tuple(valores))
+    try:
+        # Comprobar que la sesión exista.
+        cursor.execute(
+            """
+            SELECT idsesion, proyectos_idproyecto
+            FROM sesiones_asistencia
+            WHERE idsesion = %s
+            """,
+            (id_sesion,)
+        )
 
-    mysql.connection.commit()
+        sesion = cursor.fetchone()
 
-    cursor.close()
+        if sesion is None:
+            return jsonify({
+                "error": "La sesión no existe"
+            }), 404
 
-    return jsonify({
-        "resultado": "Sesión actualizada correctamente"
-    })
+        id_proyecto = sesion[1]
+
+        # Evitar guardar dos veces al mismo destinatario
+        # en una misma sesión.
+        dnis_procesados = set()
+
+        for item in asistencias:
+
+            dni = item.get("dni")
+            presente = item.get("presente")
+
+            if dni is None or presente not in (0, 1, False, True):
+                raise ValueError(
+                    "Cada asistencia debe tener un DNI y un estado válido"
+                )
+
+            dni = int(dni)
+            presente = int(presente)
+
+            if dni in dnis_procesados:
+                raise ValueError(
+                    f"El destinatario con DNI {dni} está repetido"
+                )
+
+            dnis_procesados.add(dni)
+
+            # Comprobar que el destinatario esté asignado
+            # al proyecto de la sesión.
+            cursor.execute(
+                """
+                SELECT d.dni
+                FROM destinatarios d
+                INNER JOIN destinatario_proyecto dp
+                    ON dp.destinatarios_dni = d.dni
+                WHERE d.dni = %s
+                  AND dp.proyectos_idproyecto = %s
+                """,
+                (dni, id_proyecto)
+            )
+
+            if cursor.fetchone() is None:
+                raise ValueError(
+                    f"El DNI {dni} no está asignado al proyecto de la sesión"
+                )
+
+            # Guardar el estado del destinatario.
+            cursor.execute(
+                """
+                INSERT INTO asistencia
+                    (sesiones_idsesion, destinatarios_dni, presente)
+                VALUES (%s, %s, %s)
+                """,
+                (id_sesion, dni, presente)
+            )
+
+        mysql.connection.commit()
+
+        return jsonify({
+            "resultado": "Asistencia guardada correctamente",
+            "idsesion": id_sesion,
+            "cantidad_registrada": len(asistencias)
+        }), 201
+
+    except (ValueError, TypeError) as e:
+        mysql.connection.rollback()
+
+        return jsonify({
+            "error": str(e)
+        }), 400
+
+    except Exception as e:
+        mysql.connection.rollback()
+        app.logger.exception("Error al guardar asistencia")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
 
 
-############################ ELIMINAR SESION ############################
+# =========================================================
+# TRAER ASISTENCIAS DE UNA SESIÓN
+# =========================================================
+
+@app.route("/traer_asistencias/<int:idsesion>", methods=["GET"])
+@cross_origin()
+def traer_asistencias(idsesion):
+
+    cursor = mysql.connection.cursor()
+
+    try:
+        cursor.execute(
+            """
+            SELECT
+                a.id,
+                a.sesiones_idsesion,
+                a.destinatarios_dni,
+                d.nombres,
+                d.apellidos,
+                a.presente
+            FROM asistencia a
+            INNER JOIN destinatarios d
+                ON a.destinatarios_dni = d.dni
+            WHERE a.sesiones_idsesion = %s
+            ORDER BY d.apellidos, d.nombres
+            """,
+            (idsesion,)
+        )
+
+        filas = cursor.fetchall()
+
+        asistencias = []
+
+        for fila in filas:
+            asistencias.append({
+                "id": fila[0],
+                "sesiones_idsesion": fila[1],
+                "dni": fila[2],
+                "nombre": f"{fila[4]}, {fila[3]}",
+                "presente": fila[5]
+            })
+
+        return jsonify(asistencias), 200
+
+    except Exception as e:
+        app.logger.exception("Error al consultar asistencias")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
+
+
+# =========================================================
+# ACTUALIZAR ASISTENCIA
+# =========================================================
+
+@app.route("/actualizar_asistencia/<int:id>", methods=["PUT"])
+@cross_origin()
+def actualizar_asistencia(id):
+
+    datos = request.get_json(silent=True) or {}
+
+    if "presente" not in datos:
+        return jsonify({
+            "error": "Debe indicar si el destinatario estuvo presente"
+        }), 400
+
+    presente = datos["presente"]
+
+    if presente not in (0, 1, False, True):
+        return jsonify({
+            "error": "El estado debe ser Presente o Ausente"
+        }), 400
+
+    cursor = mysql.connection.cursor()
+
+    try:
+        cursor.execute(
+            """
+            UPDATE asistencia
+            SET presente = %s
+            WHERE id = %s
+            """,
+            (int(presente), id)
+        )
+
+        if cursor.rowcount == 0:
+            cursor.execute(
+                "SELECT id FROM asistencia WHERE id = %s",
+                (id,)
+            )
+
+            if cursor.fetchone() is None:
+                return jsonify({
+                    "error": "Asistencia no encontrada"
+                }), 404
+
+        mysql.connection.commit()
+
+        return jsonify({
+            "resultado": "Asistencia actualizada correctamente"
+        }), 200
+
+    except Exception as e:
+        mysql.connection.rollback()
+        app.logger.exception("Error al actualizar asistencia")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
+
+
+# =========================================================
+# ELIMINAR ASISTENCIA
+# =========================================================
+
+@app.route("/eliminar_asistencia/<int:id>", methods=["DELETE"])
+@cross_origin()
+def eliminar_asistencia(id):
+
+    cursor = mysql.connection.cursor()
+
+    try:
+        cursor.execute(
+            "DELETE FROM asistencia WHERE id = %s",
+            (id,)
+        )
+
+        if cursor.rowcount == 0:
+            mysql.connection.rollback()
+
+            return jsonify({
+                "error": "Asistencia no encontrada"
+            }), 404
+
+        mysql.connection.commit()
+
+        return jsonify({
+            "resultado": "Asistencia eliminada correctamente"
+        }), 200
+
+    except Exception as e:
+        mysql.connection.rollback()
+        app.logger.exception("Error al eliminar asistencia")
+
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
+
+
+# =========================================================
+# ELIMINAR SESIÓN Y SUS ASISTENCIAS
+# =========================================================
 
 @app.route("/eliminar_sesion/<int:idsesion>", methods=["DELETE"])
 @cross_origin()
@@ -2308,137 +2612,55 @@ def eliminar_sesion(idsesion):
 
     cursor = mysql.connection.cursor()
 
-    cursor.execute(
-        "DELETE FROM sesiones_asistencia WHERE idsesion=%s",
-        (idsesion,)
-    )
-
-    mysql.connection.commit()
-
-    cursor.close()
-
-    return jsonify({
-        "resultado": "Sesión eliminada correctamente"
-    })
-
-
-############################ ACTUALIZAR ASISTENCIA ############################
-
-@app.route("/actualizar_asistencia/int:id", methods=["PUT"])
-@cross_origin()
-def actualizar_asistencia(id):
-
-    datos = request.json
-
-    campos = []
-    valores = []
-
-    if "presente" in datos:
-        campos.append("presente=%s")
-        valores.append(datos["presente"])
-
-    if "destinatarios_dni" in datos:
-        campos.append("destinatarios_dni=%s")
-        valores.append(datos["destinatarios_dni"])
-
-    if len(campos) == 0:
-        return jsonify({
-            "resultado": "No se enviaron datos para actualizar"
-        }), 400
-
-    sql = f"""
-    UPDATE asistencia
-    SET {', '.join(campos)}
-    WHERE id=%s
-    """
-
-    valores.append(id)
-
-    cursor = mysql.connection.cursor()
-    cursor.execute(sql, tuple(valores))
-
-    mysql.connection.commit()
-
-    cursor.close()
-
-    return jsonify({
-        "resultado": "Asistencia actualizada correctamente"
-    })
-
-
-############################ GUARDAR ASISTENCIA ############################
-
-@app.route("/guardar_asistencia", methods=["POST"])
-@cross_origin()
-def guardar_asistencia():
-
-    sesion = request.json["sesiones_idsesion"]
-    asistencias = request.json["asistencias"]
-
-    cursor = mysql.connection.cursor()
-
-    sql = """
-    INSERT INTO asistencia
-    (
-        sesiones_idsesion,
-        destinatarios_dni,
-        presente
-    )
-    VALUES (%s,%s,%s)
-    """
-
     try:
+        cursor.execute(
+            """
+            SELECT idsesion
+            FROM sesiones_asistencia
+            WHERE idsesion = %s
+            """,
+            (idsesion,)
+        )
 
-        for asistencia in asistencias:
+        if cursor.fetchone() is None:
+            return jsonify({
+                "error": "Sesión no encontrada"
+            }), 404
 
-            cursor.execute(sql, (
+        # Primero se eliminan los registros relacionados.
+        cursor.execute(
+            """
+            DELETE FROM asistencia
+            WHERE sesiones_idsesion = %s
+            """,
+            (idsesion,)
+        )
 
-                sesion,
-                asistencia["dni"],
-                asistencia["presente"]
-
-            ))
+        # Después se elimina la sesión.
+        cursor.execute(
+            """
+            DELETE FROM sesiones_asistencia
+            WHERE idsesion = %s
+            """,
+            (idsesion,)
+        )
 
         mysql.connection.commit()
 
         return jsonify({
-            "resultado":"Asistencia guardada correctamente"
-        })
+            "resultado": "Sesión y asistencias eliminadas correctamente"
+        }), 200
 
     except Exception as e:
-
         mysql.connection.rollback()
+        app.logger.exception("Error al eliminar sesión")
 
         return jsonify({
-            "error":str(e)
-        }),400
+            "error": str(e)
+        }), 500
 
     finally:
-
         cursor.close()
-
-
-############################ ELIMINAR ASISTENCIA ############################
-
-@app.route("/eliminar_asistencia/int:id", methods=["DELETE"])
-@cross_origin()
-def eliminar_asistencia(id):
-
-    sql = """
-    DELETE FROM asistencia
-    WHERE id=%s
-    """
-
-    cursor = mysql.connection.cursor()
-    cursor.execute(sql, (id,))
-
-    mysql.connection.commit()
-
-    cursor.close()
-
-    return jsonify({
-        "resultado": "Asistencia eliminada correctamente"
-    })
 
 
 ############################ TRAER ASISTENCIAS DE UNA SESION ############################
