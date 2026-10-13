@@ -2009,55 +2009,52 @@ def asignar_destinatario_proyecto():
 
 ############################ TRAER DESTINATARIOS DE UN PROYECTO ###########################
 
-@app.route("/traer_destinatarios_proyecto/<int:idproyecto>", methods=["GET"])
+@app.route(
+    "/traer_destinatarios_proyecto/<int:idproyecto>",
+    methods=["GET"]
+)
 @cross_origin()
 def traer_destinatarios_proyecto(idproyecto):
-
-    sql = """
-    SELECT
-        p.idproyecto,
-        p.nombre,
-        dp.id,
-        d.dni,
-        CONCAT(d.apellidos, ', ', d.nombres)
-    FROM proyectos p
-    INNER JOIN destinatario_proyecto dp
-        ON p.idproyecto = dp.proyectos_idproyecto
-    INNER JOIN destinatarios d
-        ON dp.destinatarios_dni = d.dni
-    WHERE p.idproyecto=%s
-    ORDER BY d.apellidos,d.nombres
-    """
-
     cursor = mysql.connection.cursor()
-    cursor.execute(sql,(idproyecto,))
 
-    resultado = cursor.fetchall()
+    try:
+        cursor.execute("""
+            SELECT
+                d.dni,
+                d.nombres,
+                d.apellidos
+            FROM destinatarios AS d
+            INNER JOIN destinatario_proyecto AS dp
+                ON dp.destinatarios_dni = d.dni
+            WHERE dp.proyectos_idproyecto = %s
+            ORDER BY d.apellidos, d.nombres
+        """, (idproyecto,))
 
-    cursor.close()
+        filas = cursor.fetchall()
 
-    if len(resultado)==0:
+        destinatarios = []
+
+        for fila in filas:
+            destinatarios.append({
+                "dni": fila[0],
+                "nombres": fila[1],
+                "apellidos": fila[2],
+                "nombre": f"{fila[1]} {fila[2]}"
+            })
+
+        return jsonify(destinatarios), 200
+
+    except Exception as e:
+        app.logger.exception(
+            "Error al cargar destinatarios del proyecto"
+        )
+
         return jsonify({
-            "mensaje":"Proyecto sin destinatarios"
-        })
+            "error": str(e)
+        }), 500
 
-    proyecto = {
-        "idproyecto":resultado[0][0],
-        "proyecto":resultado[0][1],
-        "destinatarios":[]
-    }
-
-    for i in resultado:
-
-        proyecto["destinatarios"].append({
-
-            "id":i[2],
-            "dni":i[3],
-            "nombre":i[4]
-
-        })
-
-    return jsonify(proyecto)
+    finally:
+        cursor.close()
 
 
 ############################ ACTUALIZAR DESTINATARIO DE PROYECTO ############################
@@ -2448,7 +2445,7 @@ def guardar_asistencia():
 # =========================================================
 
 @app.route("/traer_asistencias/<int:idsesion>", methods=["GET"])
-@cross_origin()
+@cross_origin() 
 def traer_asistencias(idsesion):
 
     cursor = mysql.connection.cursor()
