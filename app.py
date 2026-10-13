@@ -1971,8 +1971,7 @@ def eliminar_proyecto(id):
 
     finally:
         cursor.close()
-
-
+        
 ####################### GESTION PROYECTOS Y DESTINATARIOS ##############################
 
 ####################### ASIGNAR DESTINATARIO A PROYECTO ##############################
