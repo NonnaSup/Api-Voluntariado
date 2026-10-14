@@ -1545,65 +1545,83 @@ def eliminar_objeto(id):
 
 ############################ REGISTRAR DESTINATARIO ############################
 
+
 @app.route("/nuevo_destinatario", methods=["POST"])
 @cross_origin()
 def registrar_destinatario():
+    datos = request.get_json(silent=True) or {}
 
-    nombres = request.json["nombres"]
-    apellidos = request.json["apellidos"]
-    dni = request.json["dni"]
-    fecha_nacimiento = request.json["fecha_nacimiento"]
-    domicilio = request.json["domicilio"]
-    escuela_anio = request.json["escuela_anio"]
-    retirar_solo = request.json["retirar_solo"]
-    adulto_responsable_uno = request.json["adulto_responsable_uno"]
-    adulto_responsable_dos = request.json["adulto_responsable_dos"]
-    personas_autorizadas_retiro = request.json["personas_autorizadas_retiro"]
-    quien_vive = request.json["quien_vive"]
-    condicion_salud = request.json["condicion_salud"]
+    dni = datos.get("dni")
+    nombres = str(datos.get("nombres", datos.get("nombre", ""))).strip()
+    email = str(datos.get("email", "")).strip()
+    proyecto_id = datos.get("proyectos_idproyecto", datos.get("proyecto"))
+
+    if not dni or not nombres or not email or not proyecto_id:
+        return jsonify({
+            "resultado": "DNI, nombre, email y proyecto son obligatorios"
+        }), 400
+
+    try:
+        dni = int(dni)
+        proyecto_id = int(proyecto_id)
+    except (ValueError, TypeError):
+        return jsonify({
+            "resultado": "El DNI y el proyecto deben ser números válidos"
+        }), 400
 
     cursor = mysql.connection.cursor()
 
-    sql = """
-    INSERT INTO destinatarios
-    (
-        nombres,
-        apellidos,
-        dni,
-        fecha_nacimiento,
-        domicilio,
-        escuela_anio,
-        retirar_solo,
-        adulto_responsable_uno,
-        adulto_responsable_dos,
-        personas_autorizadas_retiro,
-        quien_vive,
-        condicion_salud
-    )
-    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    """
+    try:
+        cursor.execute(
+            "SELECT idproyecto FROM proyectos WHERE idproyecto = %s",
+            (proyecto_id,)
+        )
+        if cursor.fetchone() is None:
+            return jsonify({
+                "resultado": "El proyecto seleccionado no existe"
+            }), 404
 
-    cursor.execute(sql, (
-        nombres,
-        apellidos,
-        dni,
-        fecha_nacimiento,
-        domicilio,
-        escuela_anio,
-        retirar_solo,
-        adulto_responsable_uno,
-        adulto_responsable_dos,
-        personas_autorizadas_retiro,
-        quien_vive,
-        condicion_salud
-    ))
+        cursor.execute(
+            "SELECT dni FROM destinatarios WHERE dni = %s",
+            (dni,)
+        )
+        if cursor.fetchone() is not None:
+            return jsonify({
+                "resultado": "Ya existe un destinatario con ese DNI"
+            }), 409
 
-    mysql.connection.commit()
-    cursor.close()
+        # Requiere que apellidos y los demás campos no informados
+        # admitan NULL o tengan valores predeterminados.
+        cursor.execute("""
+            INSERT INTO destinatarios (nombres, apellidos, dni, email)
+            VALUES (%s, NULL, %s, %s)
+        """, (nombres, dni, email))
 
-    return jsonify({
-        "resultado": "Destinatario registrado"
-    })
+        cursor.execute("""
+            INSERT INTO destinatario_proyecto
+                (destinatarios_dni, proyectos_idproyecto)
+            VALUES (%s, %s)
+        """, (dni, proyecto_id))
+
+        mysql.connection.commit()
+
+        return jsonify({
+            "resultado": "Destinatario creado y asignado correctamente",
+            "dni": dni,
+            "proyectos_idproyecto": proyecto_id
+        }), 201
+
+    except Exception as e:
+        mysql.connection.rollback()
+        app.logger.exception("Error al crear destinatario")
+
+        return jsonify({
+            "resultado": "No se pudo crear el destinatario",
+            "error": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
 
 
 ############################ TRAER DESTINATARIOS ############################
@@ -1657,79 +1675,92 @@ def traer_destinatarios():
     return jsonify(destinatarios)
 
 
+
 ############################ ACTUALIZAR DESTINATARIO ############################
 
 @app.route("/actualizar_destinatario/<int:dni>", methods=["PUT"])
 @cross_origin()
 def actualizar_destinatario(dni):
 
-    datos = request.json
+    datos = request.get_json(silent=True) or {}
+
+    if not isinstance(datos, dict):
+        return jsonify({
+            "resultado": "Los datos enviados no son válidos"
+        }), 400
+
+    campos_permitidos = {
+        "nombres",
+        "apellidos",
+        "fecha_nacimiento",
+        "domicilio",
+        "escuela_anio",
+        "retirar_solo",
+        "adulto_responsable_uno",
+        "adulto_responsable_dos",
+        "personas_autorizadas_retiro",
+        "quien_vive",
+        "condicion_salud"
+    }
 
     campos = []
     valores = []
 
-    if "nombres" in datos:
-        campos.append("nombres=%s")
-        valores.append(datos["nombres"])
+    for campo in campos_permitidos:
+        if campo in datos:
+            campos.append(f"`{campo}` = %s")
+            valores.append(datos[campo])
 
-    if "apellidos" in datos:
-        campos.append("apellidos=%s")
-        valores.append(datos["apellidos"])
-
-    if "fecha_nacimiento" in datos:
-        campos.append("fecha_nacimiento=%s")
-        valores.append(datos["fecha_nacimiento"])
-
-    if "domicilio" in datos:
-        campos.append("domicilio=%s")
-        valores.append(datos["domicilio"])
-
-    if "escuela_anio" in datos:
-        campos.append("escuela_anio=%s")
-        valores.append(datos["escuela_anio"])
-
-    if "retirar_solo" in datos:
-        campos.append("retirar_solo=%s")
-        valores.append(datos["retirar_solo"])
-
-    if "adulto_responsable_uno" in datos:
-        campos.append("adulto_responsable_uno=%s")
-        valores.append(datos["adulto_responsable_uno"])
-
-    if "adulto_responsable_dos" in datos:
-        campos.append("adulto_responsable_dos=%s")
-        valores.append(datos["adulto_responsable_dos"])
-
-    if "personas_autorizadas_retiro" in datos:
-        campos.append("personas_autorizadas_retiro=%s")
-        valores.append(datos["personas_autorizadas_retiro"])
-
-    if "quien_vive" in datos:
-        campos.append("quien_vive=%s")
-        valores.append(datos["quien_vive"])
-
-    if "condicion_salud" in datos:
-        campos.append("condicion_salud=%s")
-        valores.append(datos["condicion_salud"])
-
-    if len(campos) == 0:
+    if not campos:
         return jsonify({
             "resultado": "No se enviaron datos para actualizar"
         }), 400
 
-    sql = f"UPDATE destinatarios SET {', '.join(campos)} WHERE dni=%s"
-
-    valores.append(dni)
-
     cursor = mysql.connection.cursor()
-    cursor.execute(sql, tuple(valores))
 
-    mysql.connection.commit()
-    cursor.close()
+    try:
+        cursor.execute(
+            "SELECT dni FROM destinatarios WHERE dni = %s",
+            (dni,)
+        )
 
-    return jsonify({
-        "resultado": "Destinatario actualizado correctamente"
-    })
+        if cursor.fetchone() is None:
+            return jsonify({
+                "resultado": "Destinatario no encontrado",
+                "dni": dni
+            }), 404
+
+        sql = (
+            "UPDATE destinatarios SET "
+            + ", ".join(campos)
+            + " WHERE dni = %s"
+        )
+
+        valores.append(dni)
+
+        cursor.execute(sql, tuple(valores))
+        mysql.connection.commit()
+
+        return jsonify({
+            "resultado": "Destinatario actualizado correctamente",
+            "dni": dni
+        }), 200
+
+    except Exception as e:
+        mysql.connection.rollback()
+
+        app.logger.exception(
+            "Error al actualizar destinatario con DNI %s",
+            dni
+        )
+
+        return jsonify({
+            "resultado": "No se pudo actualizar el destinatario",
+            "error": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
 
 
 ############################ ELIMINAR DESTINATARIO ############################
