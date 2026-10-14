@@ -84,9 +84,7 @@ PUT {{URL}}/desactivar_usuario/1
 
 
 
-###
-# INICIAR SESIÓN 
-
+### # INICIAR SESIÓN 
 POST {{URL}}/iniciar_sesion
 Content-Type: application/json
 

@@ -2661,7 +2661,7 @@ def eliminar_sesion(idsesion):
 
 
 ############################ TRAER ASISTENCIAS DE UNA SESION ############################
-
+'''
 @app.route("/traer_asistencias/int:idsesion", methods=["GET"])
 @cross_origin()
 def traer_asistencias(idsesion):
@@ -2707,7 +2707,7 @@ def traer_asistencias(idsesion):
         })
 
     return jsonify(asistencias)
-
+'''
 
 # =========================================================
 # INICIO
