@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from werkzeug.utils import secure_filename
 from uuid import uuid4
+from threading import Lock
 
 import os
 # para subir archivos
@@ -1543,6 +1544,54 @@ def eliminar_objeto(id):
 
 ####################### GESTION DESTINATARIOS##############################
 
+# La baja conserva la fila que necesitan las asistencias históricas.
+_estado_destinatarios_preparado = False
+_bloqueo_estado_destinatarios = Lock()
+
+
+def _asegurar_estado_destinatarios():
+    global _estado_destinatarios_preparado
+    if _estado_destinatarios_preparado:
+        return
+    with _bloqueo_estado_destinatarios:
+        if _estado_destinatarios_preparado:
+            return
+        cursor = mysql.connection.cursor()
+        try:
+            cursor.execute("SHOW COLUMNS FROM destinatarios LIKE 'activo'")
+            if cursor.fetchone() is None:
+                try:
+                    # Antes de la transacción de la ruta: ALTER hace commit implícito.
+                    cursor.execute(
+                        "ALTER TABLE destinatarios "
+                        "ADD COLUMN activo TINYINT(1) NOT NULL DEFAULT 1"
+                    )
+                except Exception as error:
+                    # Otro worker puede haber agregado la columna entre ambas consultas.
+                    if not error.args or error.args[0] != 1060:
+                        raise
+            _estado_destinatarios_preparado = True
+        finally:
+            cursor.close()
+
+
+@app.before_request
+def preparar_estado_destinatarios():
+    if request.method == "OPTIONS" or request.endpoint not in {
+        "registrar_destinatario", "traer_destinatarios", "actualizar_destinatario",
+        "eliminar_destinatario", "asignar_destinatario_proyecto",
+        "traer_destinatarios_proyecto", "actualizar_destinatario_proyecto",
+        "guardar_asistencia"
+    }:
+        return
+    try:
+        _asegurar_estado_destinatarios()
+    except Exception:
+        mysql.connection.rollback()
+        app.logger.exception("No se pudo preparar la baja de destinatarios")
+        return jsonify({"resultado": "No se pudieron preparar los destinatarios. Intentá nuevamente."}), 500
+
+
 ############################ REGISTRAR DESTINATARIO ############################
 
 
@@ -1580,9 +1629,13 @@ def registrar_destinatario():
             if cursor.fetchone() is None:
                 return jsonify({"resultado": "El proyecto seleccionado no existe"}), 404
 
-        cursor.execute("SELECT dni FROM destinatarios WHERE dni = %s", (dni,))
-        if cursor.fetchone() is not None:
-            return jsonify({"resultado": "Ya existe un destinatario con ese DNI"}), 409
+        cursor.execute("SELECT activo FROM destinatarios WHERE dni = %s", (dni,))
+        existente = cursor.fetchone()
+        if existente is not None:
+            mensaje = "Ya existe un destinatario con ese DNI" if existente[0] else (
+                "Ese DNI corresponde a un destinatario dado de baja. Su historial se conserva."
+            )
+            return jsonify({"resultado": mensaje}), 409
 
         cursor.execute("""
             INSERT INTO destinatarios (
@@ -1635,6 +1688,7 @@ def traer_destinatarios():
         condicion_salud,
         email
     FROM destinatarios
+    WHERE activo = 1
     """
 
     cursor = mysql.connection.cursor()
@@ -1712,7 +1766,7 @@ def actualizar_destinatario(dni):
 
     try:
         cursor.execute(
-            "SELECT dni FROM destinatarios WHERE dni = %s",
+            "SELECT dni FROM destinatarios WHERE dni = %s AND activo = 1 FOR UPDATE",
             (dni,)
         )
 
@@ -1725,7 +1779,7 @@ def actualizar_destinatario(dni):
         sql = (
             "UPDATE destinatarios SET "
             + ", ".join(campos)
-            + " WHERE dni = %s"
+            + " WHERE dni = %s AND activo = 1"
         )
 
         valores.append(dni)
@@ -1783,25 +1837,10 @@ def eliminar_destinatario(dni):
             mysql.connection.rollback()
             return jsonify({"resultado": "Destinatario no encontrado"}), 404
 
-        cursor.execute("SELECT COUNT(*) FROM asistencia WHERE destinatarios_dni = %s", (dni,))
-        asistencias = cursor.fetchone()[0]
-        if asistencias and request.args.get("confirmar_relaciones") != "true":
-            mysql.connection.rollback()
-            return jsonify({
-                "codigo": "confirmacion_requerida",
-                "mensaje": (
-                    f"Este destinatario tiene {asistencias} registros de asistencia. "
-                    "Si continuás, se eliminarán el destinatario, sus asistencias "
-                    "y sus asignaciones a proyectos. Las sesiones y las asistencias "
-                    "de los demás chicos se conservarán. Esta acción no se puede deshacer."
-                )
-            }), 409
-
-        cursor.execute("DELETE FROM asistencia WHERE destinatarios_dni = %s", (dni,))
-        cursor.execute("DELETE FROM destinatario_proyecto WHERE destinatarios_dni = %s", (dni,))
-        cursor.execute("DELETE FROM destinatarios WHERE dni = %s", (dni,))
+        # Incluso los clientes anteriores que envían confirmar_relaciones conservan el historial.
+        cursor.execute("UPDATE destinatarios SET activo = 0 WHERE dni = %s", (dni,))
         mysql.connection.commit()
-        return jsonify({"resultado": "Destinatario eliminado correctamente"}), 200
+        return jsonify({"resultado": "Destinatario dado de baja. Sus registros de asistencia se conservaron."}), 200
     except Exception as error:
         return _error_borrado(error, "el destinatario")
     finally:
@@ -2063,37 +2102,38 @@ def asignar_destinatario_proyecto():
 
     cursor = mysql.connection.cursor()
 
-    # Permitir reintentar una asignación sin crear otra fila para el mismo par.
-    cursor.execute(
-        "SELECT id FROM destinatario_proyecto "
-        "WHERE destinatarios_dni=%s AND proyectos_idproyecto=%s LIMIT 1",
-        (destinatarios_dni, proyectos_idproyecto)
-    )
-    existente = cursor.fetchone()
-    if existente:
+    try:
+        cursor.execute(
+            "SELECT dni FROM destinatarios WHERE dni = %s AND activo = 1 FOR UPDATE",
+            (destinatarios_dni,)
+        )
+        if cursor.fetchone() is None:
+            mysql.connection.rollback()
+            return jsonify({"resultado": "Destinatario no disponible"}), 404
+
+        # Permitir reintentar una asignación sin crear otra fila para el mismo par.
+        cursor.execute(
+            "SELECT id FROM destinatario_proyecto "
+            "WHERE destinatarios_dni=%s AND proyectos_idproyecto=%s LIMIT 1",
+            (destinatarios_dni, proyectos_idproyecto)
+        )
+        existente = cursor.fetchone()
+        if existente:
+            mysql.connection.commit()
+            return jsonify({"resultado": "El destinatario ya está asignado", "id": existente[0]})
+
+        cursor.execute("""
+            INSERT INTO destinatario_proyecto (destinatarios_dni, proyectos_idproyecto)
+            VALUES (%s, %s)
+        """, (destinatarios_dni, proyectos_idproyecto))
+        mysql.connection.commit()
+        return jsonify({"resultado": "Destinatario asignado correctamente"})
+    except Exception:
+        mysql.connection.rollback()
+        app.logger.exception("Error al asignar destinatario")
+        return jsonify({"resultado": "No se pudo asignar el destinatario"}), 500
+    finally:
         cursor.close()
-        return jsonify({"resultado": "El destinatario ya está asignado", "id": existente[0]})
-
-    sql = """
-    INSERT INTO destinatario_proyecto
-    (
-        destinatarios_dni,
-        proyectos_idproyecto
-    )
-    VALUES (%s,%s)
-    """
-
-    cursor.execute(sql, (
-        destinatarios_dni,
-        proyectos_idproyecto
-    ))
-
-    mysql.connection.commit()
-    cursor.close()
-
-    return jsonify({
-        "resultado": "Destinatario asignado correctamente"
-    })
 
 
 ############################ TRAER DESTINATARIOS DE UN PROYECTO ###########################
@@ -2117,6 +2157,7 @@ def traer_destinatarios_proyecto(idproyecto):
             INNER JOIN destinatario_proyecto AS dp
                 ON dp.destinatarios_dni = d.dni
             WHERE dp.proyectos_idproyecto = %s
+              AND d.activo = 1
             ORDER BY d.apellidos, d.nombres
         """, (idproyecto,))
 
@@ -2181,14 +2222,31 @@ def actualizar_destinatario_proyecto(id):
     valores.append(id)
 
     cursor = mysql.connection.cursor()
-    cursor.execute(sql, tuple(valores))
-
-    mysql.connection.commit()
-    cursor.close()
-
-    return jsonify({
-        "resultado": "Asignación actualizada correctamente"
-    })
+    try:
+        cursor.execute(
+            "SELECT destinatarios_dni FROM destinatario_proyecto WHERE id = %s FOR UPDATE",
+            (id,)
+        )
+        existente = cursor.fetchone()
+        if existente is None:
+            mysql.connection.rollback()
+            return jsonify({"resultado": "Asignación no encontrada"}), 404
+        cursor.execute(
+            "SELECT dni FROM destinatarios WHERE dni = %s AND activo = 1 FOR UPDATE",
+            (datos.get("destinatarios_dni", existente[0]),)
+        )
+        if cursor.fetchone() is None:
+            mysql.connection.rollback()
+            return jsonify({"resultado": "Destinatario no disponible"}), 404
+        cursor.execute(sql, tuple(valores))
+        mysql.connection.commit()
+        return jsonify({"resultado": "Asignación actualizada correctamente"})
+    except Exception:
+        mysql.connection.rollback()
+        app.logger.exception("Error al actualizar asignación de destinatario")
+        return jsonify({"resultado": "No se pudo actualizar la asignación"}), 500
+    finally:
+        cursor.close()
 
 
 ############################ ELIMINAR DESTINATARIO DE PROYECTO ############################
@@ -2485,13 +2543,15 @@ def guardar_asistencia():
                     ON dp.destinatarios_dni = d.dni
                 WHERE d.dni = %s
                   AND dp.proyectos_idproyecto = %s
+                  AND d.activo = 1
+                FOR UPDATE
                 """,
                 (dni, id_proyecto)
             )
 
             if cursor.fetchone() is None:
                 raise ValueError(
-                    f"El DNI {dni} no está asignado al proyecto de la sesión"
+                    f"El DNI {dni} no está disponible o no está asignado al proyecto de la sesión"
                 )
 
             # Guardar el estado del destinatario.
