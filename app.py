@@ -1763,23 +1763,57 @@ def actualizar_destinatario(dni):
         cursor.close()
 
 
+def _error_borrado(error, entidad):
+    mysql.connection.rollback()
+    if error.args and error.args[0] == 1451:
+        return jsonify({
+            "codigo": "otras_dependencias",
+            "resultado": (
+                f"No se pudo eliminar {entidad}: tiene otros registros asociados. "
+                "No se aplicó ningún cambio."
+            )
+        }), 409
+    app.logger.exception("Error al eliminar %s", entidad)
+    return jsonify({
+        "resultado": f"No se pudo eliminar {entidad}. No se aplicó ningún cambio."
+    }), 500
+
+
 ############################ ELIMINAR DESTINATARIO ############################
 
 @app.route("/eliminar_destinatario/<int:dni>", methods=["DELETE"])
 @cross_origin()
 def eliminar_destinatario(dni):
-
-    sql = "DELETE FROM destinatarios WHERE dni=%s"
-
     cursor = mysql.connection.cursor()
-    cursor.execute(sql, (dni,))
+    try:
+        cursor.execute("SELECT dni FROM destinatarios WHERE dni = %s FOR UPDATE", (dni,))
+        if cursor.fetchone() is None:
+            mysql.connection.rollback()
+            return jsonify({"resultado": "Destinatario no encontrado"}), 404
 
-    mysql.connection.commit()
-    cursor.close()
+        cursor.execute("SELECT COUNT(*) FROM asistencia WHERE destinatarios_dni = %s", (dni,))
+        asistencias = cursor.fetchone()[0]
+        if asistencias and request.args.get("confirmar_relaciones") != "true":
+            mysql.connection.rollback()
+            return jsonify({
+                "codigo": "confirmacion_requerida",
+                "mensaje": (
+                    f"Este destinatario tiene {asistencias} registros de asistencia. "
+                    "Si continuás, se eliminarán el destinatario, sus asistencias "
+                    "y sus asignaciones a proyectos. Las sesiones y las asistencias "
+                    "de los demás chicos se conservarán. Esta acción no se puede deshacer."
+                )
+            }), 409
 
-    return jsonify({
-        "resultado": "Destinatario eliminado correctamente"
-    })
+        cursor.execute("DELETE FROM asistencia WHERE destinatarios_dni = %s", (dni,))
+        cursor.execute("DELETE FROM destinatario_proyecto WHERE destinatarios_dni = %s", (dni,))
+        cursor.execute("DELETE FROM destinatarios WHERE dni = %s", (dni,))
+        mysql.connection.commit()
+        return jsonify({"resultado": "Destinatario eliminado correctamente"}), 200
+    except Exception as error:
+        return _error_borrado(error, "el destinatario")
+    finally:
+        cursor.close()
 
 
 ####################### GESTION PROYECTOS ##############################
@@ -1969,37 +2003,58 @@ def actualizar_proyecto(id):
 @app.route("/eliminar_proyecto/<int:id>", methods=["DELETE"])
 @cross_origin()
 def eliminar_proyecto(id):
+    id_proyecto = id
     cursor = mysql.connection.cursor()
-
     try:
-        cursor.execute(
-            "DELETE FROM proyectos WHERE idproyecto=%s",
-            (id,)
-        )
+        cursor.execute("SELECT idproyecto FROM proyectos WHERE idproyecto = %s FOR UPDATE", (id_proyecto,))
+        if cursor.fetchone() is None:
+            mysql.connection.rollback()
+            return jsonify({"resultado": "Proyecto no encontrado"}), 404
 
-        mysql.connection.commit()
-
-        if cursor.rowcount == 0:
+        cursor.execute("SELECT COUNT(*) FROM sesiones_asistencia WHERE proyectos_idproyecto = %s", (id_proyecto,))
+        sesiones = cursor.fetchone()[0]
+        cursor.execute("SELECT idRegistro_objetos FROM inventario WHERE idProyecto = %s FOR UPDATE", (id_proyecto,))
+        objetos = cursor.fetchall()
+        if (sesiones or objetos) and request.args.get("confirmar_relaciones") != "true":
+            mysql.connection.rollback()
             return jsonify({
-                "resultado": "Proyecto no encontrado"
-            }), 404
+                "codigo": "confirmacion_requerida",
+                "mensaje": (
+                    f"Este proyecto tiene {sesiones} sesiones de asistencia y "
+                    f"{len(objetos)} materiales de inventario a su cargo. "
+                    "Si continuás, se eliminarán el proyecto, sus sesiones, las asistencias "
+                    "de esas sesiones y los materiales que no estén compartidos con otros proyectos. "
+                    "Los destinatarios y los materiales compartidos se conservarán. "
+                    "Esta acción no se puede deshacer."
+                )
+            }), 409
 
-        return jsonify({
-            "resultado": "Proyecto eliminado correctamente"
-        }), 200
+        cursor.execute("""
+            DELETE a FROM asistencia AS a
+            INNER JOIN sesiones_asistencia AS s ON s.idsesion = a.sesiones_idsesion
+            WHERE s.proyectos_idproyecto = %s
+        """, (id_proyecto,))
+        cursor.execute("DELETE FROM sesiones_asistencia WHERE proyectos_idproyecto = %s", (id_proyecto,))
+        cursor.execute("DELETE FROM destinatario_proyecto WHERE proyectos_idproyecto = %s", (id_proyecto,))
+        cursor.execute("DELETE FROM inventario_proyecto WHERE proyectos_idproyecto = %s", (id_proyecto,))
 
-    except Exception as e:
-        mysql.connection.rollback()
-        print("Error al eliminar proyecto:", e)
+        for (id_objeto,) in objetos:
+            cursor.execute("""
+                SELECT proyectos_idproyecto FROM inventario_proyecto
+                WHERE inventario_id = %s
+                ORDER BY proyectos_idproyecto LIMIT 1 FOR UPDATE
+            """, (id_objeto,))
+            otro_proyecto = cursor.fetchone()
+            if otro_proyecto:
+                cursor.execute("UPDATE inventario SET idProyecto = %s WHERE idRegistro_objetos = %s", (otro_proyecto[0], id_objeto))
+            else:
+                cursor.execute("DELETE FROM inventario WHERE idRegistro_objetos = %s", (id_objeto,))
 
-        return jsonify({
-            "resultado": (
-                "No se pudo eliminar el proyecto. "
-                "Puede tener destinatarios u otros registros asociados."
-            ),
-            "error": str(e)
-        }), 400
-
+        cursor.execute("DELETE FROM proyectos WHERE idproyecto = %s", (id_proyecto,))
+        mysql.connection.commit()
+        return jsonify({"resultado": "Proyecto eliminado correctamente"}), 200
+    except Exception as error:
+        return _error_borrado(error, "el proyecto")
     finally:
         cursor.close()
         
