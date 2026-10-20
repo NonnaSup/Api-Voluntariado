@@ -1550,76 +1550,65 @@ def eliminar_objeto(id):
 @cross_origin()
 def registrar_destinatario():
     datos = request.get_json(silent=True) or {}
+    if not isinstance(datos, dict):
+        return jsonify({"resultado": "Los datos enviados no son validos"}), 400
+    campos_texto = (
+        "nombres", "apellidos", "fecha_nacimiento", "domicilio", "escuela_anio",
+        "adulto_responsable_uno", "adulto_responsable_dos",
+        "personas_autorizadas_retiro", "quien_vive", "condicion_salud"
+    )
+    valores_texto = {campo: str(datos.get(campo) or "").strip() for campo in campos_texto}
+    if not all(valores_texto.values()):
+        return jsonify({"resultado": "Completa todos los campos obligatorios del destinatario"}), 400
 
-    dni = datos.get("dni")
-    nombres = str(datos.get("nombres", datos.get("nombre", ""))).strip()
-    email = str(datos.get("email", "")).strip()
     proyecto_id = datos.get("proyectos_idproyecto", datos.get("proyecto"))
-
-    if not dni or not nombres or not email or not proyecto_id:
-        return jsonify({
-            "resultado": "DNI, nombre, email y proyecto son obligatorios"
-        }), 400
-
     try:
-        dni = int(dni)
-        proyecto_id = int(proyecto_id)
+        dni = int(datos.get("dni"))
+        retirar_solo = int(datos.get("retirar_solo"))
+        if proyecto_id is not None:
+            proyecto_id = int(proyecto_id)
+        if dni <= 0 or retirar_solo not in (0, 1) or (proyecto_id is not None and proyecto_id <= 0):
+            raise ValueError()
     except (ValueError, TypeError):
-        return jsonify({
-            "resultado": "El DNI y el proyecto deben ser números válidos"
-        }), 400
+        return jsonify({"resultado": "Revisa el DNI, el proyecto y la autorizacion de retiro"}), 400
 
+    email = str(datos.get("email") or "").strip()
     cursor = mysql.connection.cursor()
-
     try:
-        cursor.execute(
-            "SELECT idproyecto FROM proyectos WHERE idproyecto = %s",
-            (proyecto_id,)
-        )
-        if cursor.fetchone() is None:
-            return jsonify({
-                "resultado": "El proyecto seleccionado no existe"
-            }), 404
+        if proyecto_id is not None:
+            cursor.execute("SELECT idproyecto FROM proyectos WHERE idproyecto = %s", (proyecto_id,))
+            if cursor.fetchone() is None:
+                return jsonify({"resultado": "El proyecto seleccionado no existe"}), 404
 
-        cursor.execute(
-            "SELECT dni FROM destinatarios WHERE dni = %s",
-            (dni,)
-        )
+        cursor.execute("SELECT dni FROM destinatarios WHERE dni = %s", (dni,))
         if cursor.fetchone() is not None:
-            return jsonify({
-                "resultado": "Ya existe un destinatario con ese DNI"
-            }), 409
-
-        # Requiere que apellidos y los demás campos no informados
-        # admitan NULL o tengan valores predeterminados.
-        cursor.execute("""
-            INSERT INTO destinatarios (nombres, apellidos, dni, email)
-            VALUES (%s, NULL, %s, %s)
-        """, (nombres, dni, email))
+            return jsonify({"resultado": "Ya existe un destinatario con ese DNI"}), 409
 
         cursor.execute("""
-            INSERT INTO destinatario_proyecto
-                (destinatarios_dni, proyectos_idproyecto)
-            VALUES (%s, %s)
-        """, (dni, proyecto_id))
-
+            INSERT INTO destinatarios (
+                nombres, apellidos, dni, fecha_nacimiento, domicilio, escuela_anio,
+                retirar_solo, adulto_responsable_uno, adulto_responsable_dos,
+                personas_autorizadas_retiro, quien_vive, condicion_salud, email
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (
+            valores_texto["nombres"], valores_texto["apellidos"], dni,
+            valores_texto["fecha_nacimiento"], valores_texto["domicilio"],
+            valores_texto["escuela_anio"], retirar_solo,
+            valores_texto["adulto_responsable_uno"], valores_texto["adulto_responsable_dos"],
+            valores_texto["personas_autorizadas_retiro"], valores_texto["quien_vive"],
+            valores_texto["condicion_salud"], email
+        ))
+        if proyecto_id is not None:
+            cursor.execute("""
+                INSERT INTO destinatario_proyecto (destinatarios_dni, proyectos_idproyecto)
+                VALUES (%s, %s)
+            """, (dni, proyecto_id))
         mysql.connection.commit()
-
-        return jsonify({
-            "resultado": "Destinatario creado y asignado correctamente",
-            "dni": dni,
-            "proyectos_idproyecto": proyecto_id
-        }), 201
-
+        return jsonify({"resultado": "Destinatario registrado", "dni": dni}), 201
     except Exception as e:
         mysql.connection.rollback()
         app.logger.exception("Error al crear destinatario")
-
-        return jsonify({
-            "resultado": "No se pudo crear el destinatario",
-            "error": str(e)
-        }), 500
-
+        return jsonify({"resultado": "No se pudo crear el destinatario", "error": str(e)}), 500
     finally:
         cursor.close()
 
@@ -1643,7 +1632,8 @@ def traer_destinatarios():
         adulto_responsable_dos,
         personas_autorizadas_retiro,
         quien_vive,
-        condicion_salud
+        condicion_salud,
+        email
     FROM destinatarios
     """
 
@@ -1669,7 +1659,8 @@ def traer_destinatarios():
             "adulto_responsable_dos": i[8],
             "personas_autorizadas_retiro": i[9],
             "quien_vive": i[10],
-            "condicion_salud": i[11]
+            "condicion_salud": i[11],
+            "email": i[12]
         })
 
     return jsonify(destinatarios)
@@ -1700,7 +1691,8 @@ def actualizar_destinatario(dni):
         "adulto_responsable_dos",
         "personas_autorizadas_retiro",
         "quien_vive",
-        "condicion_salud"
+        "condicion_salud",
+        "email"
     }
 
     campos = []
@@ -2071,6 +2063,17 @@ def asignar_destinatario_proyecto():
 
     cursor = mysql.connection.cursor()
 
+    # Permitir reintentar una asignación sin crear otra fila para el mismo par.
+    cursor.execute(
+        "SELECT id FROM destinatario_proyecto "
+        "WHERE destinatarios_dni=%s AND proyectos_idproyecto=%s LIMIT 1",
+        (destinatarios_dni, proyectos_idproyecto)
+    )
+    existente = cursor.fetchone()
+    if existente:
+        cursor.close()
+        return jsonify({"resultado": "El destinatario ya está asignado", "id": existente[0]})
+
     sql = """
     INSERT INTO destinatario_proyecto
     (
@@ -2108,7 +2111,8 @@ def traer_destinatarios_proyecto(idproyecto):
             SELECT
                 d.dni,
                 d.nombres,
-                d.apellidos
+                d.apellidos,
+                dp.id
             FROM destinatarios AS d
             INNER JOIN destinatario_proyecto AS dp
                 ON dp.destinatarios_dni = d.dni
@@ -2125,6 +2129,7 @@ def traer_destinatarios_proyecto(idproyecto):
                 "dni": fila[0],
                 "nombres": fila[1],
                 "apellidos": fila[2],
+                "id": fila[3],
                 "nombre": f"{fila[1]} {fila[2]}"
             })
 
